@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>MathematicaTests</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Lets the project also compile on non-Windows build agents; no effect on Windows. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Official Wolfram .NET/Link package. At runtime it still needs a local
+      Mathematica installation to launch the kernel (see KernelSession).
+      If you prefer the copy that ships with Mathematica instead, remove this
+      PackageReference and add:
+        <Reference Include="Wolfram.NETLink">
+          <HintPath>C:\Program Files\Wolfram Research\Mathematica\15.0\SystemFiles\Links\NETLink\Wolfram.NETLink.dll</HintPath>
+        </Reference>
+    -->
+    <!-- NU1701: the package targets .NET Framework but is supported by Wolfram on modern .NET. -->
+    <PackageReference Include="Wolfram.NETLink" Version="1.7.1" NoWarn="NU1701" />
+  </ItemGroup>
+
+</Project>
