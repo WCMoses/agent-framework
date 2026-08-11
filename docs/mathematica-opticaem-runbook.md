@@ -26,11 +26,50 @@ Copy this block for each new issue.
 
 ## Lifecycle steps to watch (pre-seeded — fill as we learn)
 
-### startup — cold-start the kernel
-- **Brief:** _tbd_
-- **How to identify:** `StartAsync` returns `Status = LinkError`.
-- **How to fix:** _tbd — verify kernel command line / MathKernel path._
-- **Status:** open
+### startup — native MathLink library (ml64i4.dll) not found
+- **Brief:** the `Wolfram.NETLink` NuGet package is managed-only; it P/Invokes the
+  native `ml64i4.dll`, which ships inside the Mathematica install, not the package.
+- **Severity:** blocker
+- **Where:** startup (first touch of any Wolfram.NETLink type).
+- **Full description:** without the native DLL on the search path you get
+  *"The type initializer for 'Wolfram.NETLink.Internal.NativeLink' threw an
+  exception"*. This is the "file or two I had to copy into bin\Debug" — that file
+  is `ml64i4.dll`, from `<install>\SystemFiles\Links\NETLink\`.
+- **How to identify:** `StartAsync` returns `Status = LinkError` with the
+  ml64i4.dll message; or the NativeLink type-initializer exception.
+- **How to fix:** `MathematicaLocator.EnsureNativeLibraryOnPath()` (called at the
+  top of `StartAsync`) finds the install and prepends its native-lib dir to PATH —
+  no manual copy needed. If the install is non-standard, set `MATHEMATICA_HOME`.
+  Manual fallback: copy `ml64i4.dll` from `<install>\SystemFiles\Links\NETLink\`
+  next to the built exe (bin\Debug).
+- **Status:** fixed (via MathematicaLocator)
+
+### startup — kernel launches but never answers (handshake stall)
+- **Brief:** kernel process starts but blocks, so the MathLink handshake never
+  completes; the 60s startup timeout fires.
+- **Severity:** blocker
+- **Where:** startup (`CreateAndConnect`, "waiting for the kernel handshake").
+- **Full description:** almost always the kernel is stuck on a license/activation
+  prompt. The MathLink launch protocol has no timeout of its own, which is why the
+  link uses a worker-thread + `StartupTimeout` and reports which stage stalled.
+- **How to identify:** `StartAsync` returns `Status = LinkError` with a
+  `TimeoutException` message naming "waiting for the kernel handshake".
+- **How to fix:** run `MathKernel.exe` (or `WolframKernel.exe`) from the install
+  by hand once — it should show an `In[1]:=` prompt; if it shows an activation
+  dialog, activate it, then retry.
+- **Status:** fixed (diagnosis captured; resolution is one-time activation)
+
+### startup — NuGet managed/native version mismatch
+- **Brief:** the NuGet `Wolfram.NETLink` (managed) and the install's `ml64i4.dll`
+  (native) are a mismatched pair.
+- **Severity:** warning
+- **Where:** startup.
+- **How to identify:** explicit launch and default discovery both fail/timeout
+  despite a valid install and license.
+- **How to fix:** switch from the `PackageReference` to a direct `Reference` on the
+  `Wolfram.NETLink.dll` inside your install (matched pair) — the commented block in
+  `MathematicaLink.csproj` shows how.
+- **Status:** open (workaround documented)
 
 ### load — load OpticaEM into a fresh kernel
 - **Brief:** _tbd — the exact load call differs by OpticaEM version._

@@ -1,39 +1,48 @@
-// Wolfram.NETLink lives in Wolfram.NETLink.dll, shipped INSIDE your Mathematica
-// install (…/SystemFiles/Links/NETLink/Wolfram.NETLink.dll). It is not on NuGet.
-// See MathematicaLink.csproj for how to reference it. This file will not compile
-// until that reference resolves and a kernel is installed.
+// Wolfram.NETLink comes from the Wolfram.NETLink NuGet package (managed-only).
+// At runtime it P/Invokes the native ml64i4.dll from the Mathematica install —
+// MathematicaLocator.EnsureNativeLibraryOnPath() makes that resolvable. This file
+// will not compile/run in a container without a Mathematica install present.
 using Wolfram.NETLink;
 
 namespace MathematicaLink;
 
 /// <summary>
-/// A local, persistent-kernel implementation of <see cref="IMathematicaLink"/>
-/// over Wolfram.NETLink / WSTP. One process, one kernel, calls serialized.
+/// Local, persistent-kernel implementation of <see cref="IMathematicaLink"/> over
+/// Wolfram.NETLink / WSTP. One process, one kernel, calls serialized.
 ///
-/// This is the "local machine" implementation. Cloud / Wolfram-Cloud variants
-/// implement the same interface so nothing above the link cares which is live.
+/// The startup strategy (native-lib-on-PATH, explicit "-mathlink" launch with a
+/// default-discovery fallback, and a worker-thread startup timeout that reports
+/// which stage stalled) is ported from the proven WCMoses connect test against
+/// Mathematica 15.0.
 /// </summary>
 public sealed class NetLinkMathematicaLink : IMathematicaLink
 {
-    // Sentinels used to frame the {result, $MessageList} payload so we can split
-    // it back apart in C# unambiguously. See EvaluateAsync. This wrapper is the
-    // PRIMARY SEAM to validate against the real kernel (Phase 1, Goal 2) — if
-    // message capture looks wrong, this string is what you tune.
+    // Sentinels framing the {result, $MessageList} payload so EvaluateAsync can
+    // split it back apart. This wrapper + ParseFramed is the PRIMARY SEAM to
+    // validate against the real kernel — see the runbook "evaluate" entry.
     private const string ResultMarker = "<<<AF-RESULT>>>";
     private const string MsgMarker = "<<<AF-MESSAGES>>>";
     private const string EndMarker = "<<<AF-END>>>";
 
-    private readonly string _kernelCommandLine;
+    // The MathLink launch protocol has no timeout of its own; without this a bad
+    // launch (e.g. kernel stuck on a license prompt) hangs forever.
+    private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(60);
+
+    private readonly Action<string>? _log;
+    private readonly string? _kernelPathOverride;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private IKernelLink? _link;
 
-    /// <param name="kernelCommandLine">
-    /// The MathLink launch string, e.g. on Windows:
-    ///   "-linkmode launch -linkname \"C:\\Program Files\\Wolfram Research\\Mathematica\\14.0\\MathKernel.exe\""
-    /// or, if the kernel is on PATH: "-linkmode launch -linkname math -mathlink".
+    /// <param name="log">Optional startup/diagnostic log sink.</param>
+    /// <param name="kernelPathOverride">
+    /// Explicit kernel executable path. Leave null to let <see cref="MathematicaLocator"/>
+    /// find the newest install (honoring MATHEMATICA_HOME).
     /// </param>
-    public NetLinkMathematicaLink(string kernelCommandLine) =>
-        _kernelCommandLine = kernelCommandLine;
+    public NetLinkMathematicaLink(Action<string>? log = null, string? kernelPathOverride = null)
+    {
+        _log = log;
+        _kernelPathOverride = kernelPathOverride;
+    }
 
     public bool IsRunning => _link is not null;
 
@@ -46,13 +55,40 @@ public sealed class NetLinkMathematicaLink : IMathematicaLink
 
             return await Task.Run(() =>
             {
+                // Must run before any Wolfram.NETLink type is touched.
+                if (MathematicaLocator.EnsureNativeLibraryOnPath() is null)
+                {
+                    string probed = MathematicaLocator.FindInstallRoot()
+                        ?? "no Wolfram Research installation found under Program Files";
+                    return MathResult.Link(
+                        "Could not locate the native MathLink library (ml64i4.dll). Searched: " + probed +
+                        ". Set MATHEMATICA_HOME to the install folder (e.g. " +
+                        @"C:\Program Files\Wolfram Research\Mathematica\15.0) or copy ml64i4.dll into bin\Debug.");
+                }
+
+                Log("Native MathLink dir: " + MathematicaLocator.NativeLibraryDirectory);
+                Log("Install root:        " + (MathematicaLocator.InstallRoot ?? "(not located)"));
+
+                string? kernel = _kernelPathOverride ?? MathematicaLocator.FindKernelExecutable();
                 try
                 {
-                    var link = MathLinkFactory.CreateKernelLink(_kernelCommandLine);
-                    // Discard the initial InputNamePacket the kernel emits on connect.
-                    link.WaitAndDiscardAnswer();
-                    _link = link;
-                    return MathResult.Ok(raw: "kernel started");
+                    if (kernel is not null)
+                    {
+                        try
+                        {
+                            // Quoted path + -mathlink inside the linkname, per the launch protocol.
+                            string[] args = ["-linkmode", "launch", "-linkname", $"\"{kernel}\" -mathlink"];
+                            _link = CreateAndConnect(args, "explicit launch of " + kernel);
+                            return MathResult.Ok(raw: "kernel started (explicit)");
+                        }
+                        catch (Exception ex)
+                        {
+                            Log("Explicit launch failed: " + ex.Message + "; falling back to default discovery.");
+                        }
+                    }
+
+                    _link = CreateAndConnect([], "default CreateKernelLink()");
+                    return MathResult.Ok(raw: "kernel started (default discovery)");
                 }
                 catch (Exception ex)
                 {
@@ -63,10 +99,57 @@ public sealed class NetLinkMathematicaLink : IMathematicaLink
         finally { _gate.Release(); }
     }
 
+    /// <summary>
+    /// Create the link and complete the kernel handshake on a worker thread,
+    /// failing loudly if it exceeds <see cref="StartupTimeout"/>. Ported from the
+    /// connect test — a stalled handshake almost always means a license/activation
+    /// prompt (run MathKernel.exe by hand once to clear it).
+    /// </summary>
+    private IKernelLink CreateAndConnect(string[] args, string description)
+    {
+        Log("Launching kernel: " + description);
+
+        IKernelLink? pending = null;
+        IKernelLink? connected = null;
+        Exception? failure = null;
+        using var done = new ManualResetEventSlim(false);
+
+        var worker = new Thread(() =>
+        {
+            try
+            {
+                IKernelLink l = args.Length == 0
+                    ? MathLinkFactory.CreateKernelLink()
+                    : MathLinkFactory.CreateKernelLink(args);
+                pending = l;
+                Log("Link created; waiting for kernel handshake (first packet)...");
+                l.WaitAndDiscardAnswer();
+                connected = l;
+            }
+            catch (Exception ex) { failure = ex; }
+            finally { done.Set(); }
+        })
+        { IsBackground = true, Name = "KernelStartup" };
+        worker.Start();
+
+        if (!done.Wait(StartupTimeout))
+        {
+            try { pending?.Close(); } catch { }
+            string stage = pending is null ? "creating the link" : "waiting for the kernel handshake";
+            throw new TimeoutException(
+                $"Kernel startup timed out after {StartupTimeout.TotalSeconds:0}s while {stage} ({description}). " +
+                "Most common cause: the kernel is stuck on a license/activation prompt — run MathKernel.exe " +
+                "by hand once; it should show an In[1]:= prompt. See the runbook.");
+        }
+
+        if (failure is not null)
+            throw new InvalidOperationException($"Kernel launch failed ({description}): {failure.Message}", failure);
+
+        Log("Kernel handshake complete.");
+        return connected!;
+    }
+
     public Task<MathResult> LoadPackageAsync(string loadCommand, CancellationToken ct = default) =>
-        // A package load is just an evaluation; surfaced separately so the runbook
-        // can log load-specific quirks. Callers should inspect Messages for
-        // "package not found" / context shadowing warnings.
         EvaluateAsync(loadCommand, ct).ContinueWith(t =>
         {
             var r = t.Result;
@@ -77,9 +160,9 @@ public sealed class NetLinkMathematicaLink : IMathematicaLink
     {
         if (_link is null) return MathResult<string>.Failure("kernel not started", MathStatus.NotStarted);
 
-        // Wrap so the kernel returns BOTH the value (InputForm) and the message
-        // list generated during evaluation, framed by sentinels. $MessageList is
-        // reset per top-level evaluation, so it must be read in the same round trip.
+        // Wrap so the kernel returns BOTH the value (InputForm) and the messages
+        // generated during evaluation, framed by sentinels. $MessageList resets per
+        // top-level evaluation, so it must be read in the same round trip.
         string wrapped =
             "Module[{afRes = (" + expression + ")}, " +
             "\"" + ResultMarker + "\" <> ToString[afRes, InputForm] <> " +
@@ -93,6 +176,7 @@ public sealed class NetLinkMathematicaLink : IMathematicaLink
             {
                 string err = link.ErrorMessage;
                 link.ClearError();
+                link.NewPacket();
                 return MathResult<string>.Link(err);
             }
 
@@ -112,15 +196,15 @@ public sealed class NetLinkMathematicaLink : IMathematicaLink
 
         return await RunGuarded(link =>
         {
-            // NOTE: EvaluateToImage returns a System.Drawing.Image (needs
-            // System.Drawing.Common; desktop only). It does not surface
-            // $MessageList — if an image step needs its messages too, evaluate
-            // the graphic with EvaluateAsync first, then export separately.
+            // EvaluateToImage returns a System.Drawing.Image (desktop only) and does
+            // NOT surface $MessageList — if an image step needs its messages, run it
+            // through EvaluateAsync first, then export.
             using var img = link.EvaluateToImage(expression, width, height);
             if (link.Error != 0)
             {
                 string err = link.ErrorMessage;
                 link.ClearError();
+                link.NewPacket();
                 return MathResult<byte[]>.Link(err);
             }
             if (img is null)
@@ -177,11 +261,10 @@ public sealed class NetLinkMathematicaLink : IMathematicaLink
         try
         {
             var link = _link;
-            if (link is null) return onTimeout(); // shut down between the guard and here
+            if (link is null) return onTimeout();
 
             using var reg = ct.Register(() =>
             {
-                // Cooperative abort: tell the kernel to stop the current evaluation.
                 try { link.AbortEvaluation(); } catch { /* link may already be dead */ }
             });
 
@@ -190,17 +273,11 @@ public sealed class NetLinkMathematicaLink : IMathematicaLink
                 try { return body(link); }
                 catch (MathLinkException mlx)
                 {
-                    try { link.ClearError(); } catch { /* ignore */ }
+                    try { link.ClearError(); } catch { }
                     return (TResult)(object)MathResult.Link($"MathLink error {mlx.ErrCode}: {mlx.Message}");
                 }
-                catch (Exception ex) when (ct.IsCancellationRequested)
-                {
-                    return onTimeout();
-                }
-                catch (Exception ex)
-                {
-                    return (TResult)(object)MathResult.Failure(ex.Message, MathStatus.LinkError);
-                }
+                catch (Exception) when (ct.IsCancellationRequested) { return onTimeout(); }
+                catch (Exception ex) { return (TResult)(object)MathResult.Failure(ex.Message, MathStatus.LinkError); }
             }, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { return onTimeout(); }
@@ -216,19 +293,11 @@ public sealed class NetLinkMathematicaLink : IMathematicaLink
         int m = raw.IndexOf(MsgMarker, StringComparison.Ordinal);
         int e = raw.IndexOf(EndMarker, StringComparison.Ordinal);
         if (r < 0 || m < 0 || e < 0 || !(r < m && m < e))
-        {
-            // Framing missing — the wrapper itself failed (syntax error before our
-            // Module ran, aborted output, etc.). Return the raw text as the value
-            // so the runbook has something to diagnose.
-            return (raw.Trim(), messages);
-        }
+            return (raw.Trim(), messages); // framing missing — wrapper itself failed
 
         string value = raw.Substring(r + ResultMarker.Length, m - (r + ResultMarker.Length)).Trim();
         string msgBlock = raw.Substring(m + MsgMarker.Length, e - (m + MsgMarker.Length)).Trim();
 
-        // $MessageList comes back as InputForm: {HoldForm[Power::infy], HoldForm[...]}.
-        // First-pass parse: strip the outer braces and split on top-level commas.
-        // Refine here as we learn the real shapes (see runbook: "message parsing").
         if (msgBlock.Length > 2 && msgBlock.StartsWith("{") && msgBlock.EndsWith("}"))
         {
             string inner = msgBlock[1..^1].Trim();
@@ -236,7 +305,6 @@ public sealed class NetLinkMathematicaLink : IMathematicaLink
             {
                 string t = tag.Trim();
                 if (t.Length == 0) continue;
-                // t looks like "HoldForm[Power::infy]" — pull out the sym::tag.
                 string clean = t.Replace("HoldForm[", "").Replace("]", "").Trim();
                 var sev = LooksLikeError(clean) ? MessageSeverity.Error : MessageSeverity.Warning;
                 messages.Add(new MathematicaMessage(clean, t, sev));
@@ -246,7 +314,6 @@ public sealed class NetLinkMathematicaLink : IMathematicaLink
         return (value, messages);
     }
 
-    // Split on commas that are not nested inside [] or {}.
     private static IEnumerable<string> SplitTopLevel(string s)
     {
         int depth = 0, start = 0;
@@ -260,10 +327,9 @@ public sealed class NetLinkMathematicaLink : IMathematicaLink
         if (start < s.Length) yield return s[start..];
     }
 
-    // Heuristic until we catalogue real tags in the runbook. OpticaEM/Mathematica
-    // error tags are not reliably distinguishable from warnings by name alone;
-    // treat a few well-known fatal-ish ones as errors and refine over time.
     private static bool LooksLikeError(string tag) =>
         tag.Contains("::nonopt") || tag.Contains("::argx") || tag.Contains("::argr") ||
         tag.Contains("::badarg") || tag.Contains("::syntax") || tag.Contains("Syntax::");
+
+    private void Log(string line) => _log?.Invoke(line);
 }

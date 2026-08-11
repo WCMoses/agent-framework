@@ -34,8 +34,10 @@ Three failure classes you handle differently:
 ## Wiring it up
 
 ```csharp
-await using var link = new NetLinkMathematicaLink(
-    "-linkmode launch -linkname \"C:\\Program Files\\Wolfram Research\\Mathematica\\14.0\\MathKernel.exe\"");
+// No kernel path needed — MathematicaLocator finds the newest install
+// (honors MATHEMATICA_HOME) and puts ml64i4.dll on PATH. Pass a log sink to
+// see startup steps; pass kernelPathOverride only for a non-standard install.
+await using var link = new NetLinkMathematicaLink(log: Console.WriteLine);
 
 var opticaem = new OpticaEmSession(link, loadCommand: "Needs[\"OpticaEM`\"]"); // <- your version's real load call
 
@@ -63,6 +65,7 @@ the unknowns Phase 1 exists to pin down. When you find the real shapes, tune
 | `Results.cs` | `MathResult`, `MathResult<T>`, `MathematicaMessage`, status/severity enums |
 | `IMathematicaLink.cs` | the link contract (local, cloud, Wolfram-cloud all implement it) |
 | `NetLinkMathematicaLink.cs` | local persistent-kernel implementation over Wolfram.NETLink |
+| `MathematicaLocator.cs` | finds the install, puts `ml64i4.dll` on PATH (ported from the connect test) |
 | `OpticaEmSession.cs` | thin OpticaEM layer; runs program *files* you supply |
 | `../../docs/mathematica-opticaem-runbook.md` | the idiosyncrasy log (name/brief/full/identify/fix) |
 | `../../docs/mathematica-startup-verify.md` | the boot + 5-step ladder sequence |

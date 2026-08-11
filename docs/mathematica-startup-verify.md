@@ -36,10 +36,26 @@ Each step's PNG lands next to the program (or in `out/`) for eyeball verificatio
 shape we can add a numeric assertion (ray directions before/after) — that same
 numeric channel becomes the Mathematica scoring oracle for the larger project.
 
+## Kernel launch — solved (from the connect test)
+
+Confirmed against **Mathematica 15.0** in
+`WCMoses/Mathematica-Basic-NetLink-Connection`; the strategy is ported into
+`NetLinkMathematicaLink`:
+
+1. `MathematicaLocator.EnsureNativeLibraryOnPath()` — puts the install's native
+   `ml64i4.dll` dir on PATH (or honors `MATHEMATICA_HOME`). No manual bin\Debug
+   copy needed; copying `ml64i4.dll` next to the exe is the fallback.
+2. Explicit launch: `-linkmode launch -linkname "\"<MathKernel.exe>\" -mathlink"`.
+3. Fallback: default `MathLinkFactory.CreateKernelLink()` (launches newest install).
+4. 60s worker-thread startup timeout that reports whether it stalled *creating the
+   link* vs *waiting for the handshake* (handshake stall ⇒ license/activation prompt).
+
+You normally don't pass a kernel path — the locator finds it. Override only if the
+install is somewhere the locator can't find and `MATHEMATICA_HOME` isn't set.
+
 ## What we still need to fill in
 
-1. The **kernel command line** for the machine (MathKernel path).
-2. The **OpticaEM load call** for the current version (waiting on the password /
+1. The **OpticaEM load call** for the current version (waiting on the password /
    new version).
-3. **One validated program** (even just `01_element.m`) to seed the ladder — from
+2. **One validated program** (even just `01_element.m`) to seed the ladder — from
    the GUI export or the author, so we debug real syntax, not guesses.
