@@ -1,0 +1,7 @@
+# Native MathLink library — licensed, machine/version-specific. Kept in the
+# project root so `dotnet clean` can't delete it, copied to output on build,
+# but never committed. Each machine supplies its own from the Mathematica install.
+ml64i4.dll
+
+bin/
+obj/

@@ -40,9 +40,14 @@ Copy this block for each new issue.
 - **How to fix:** `MathematicaLocator.EnsureNativeLibraryOnPath()` (called at the
   top of `StartAsync`) finds the install and prepends its native-lib dir to PATH —
   no manual copy needed. If the install is non-standard, set `MATHEMATICA_HOME`.
-  Manual fallback: copy `ml64i4.dll` from `<install>\SystemFiles\Links\NETLink\`
-  next to the built exe (bin\Debug).
-- **Status:** fixed (via MathematicaLocator)
+  Manual/pinned fallback: keep `ml64i4.dll` in the **project root** (not bin\) so
+  `dotnet clean` can't delete it; the csproj copies it to the output dir on build
+  (`<None Include="ml64i4.dll"><CopyToOutputDirectory>PreserveNewest</...>`), and
+  the locator's exe-directory check then pins that copy over PATH discovery. The
+  DLL is git-ignored (licensed, machine/version-specific).
+- **Gotcha:** copying it only into bin\Debug is fragile — `dotnet clean` wipes bin\
+  and the file is gone. Root + copy-to-output is the durable form.
+- **Status:** fixed (via MathematicaLocator; pinned-copy path documented)
 
 ### startup — kernel launches but never answers (handshake stall)
 - **Brief:** kernel process starts but blocks, so the MathLink handshake never

@@ -22,6 +22,20 @@
     <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Native MathLink library kept in the PROJECT ROOT (next to this .csproj),
+         not in bin/, so `dotnet clean` cannot delete it. The build copies it into
+         the output dir on every build, so P/Invoke and MathematicaLocator's
+         exe-directory check find it (and pin THIS copy over PATH discovery).
+         The file itself is git-ignored — it's a licensed, machine/version-specific
+         binary, so each machine keeps its own. If you dropped it at the REPO root
+         instead, change the Include path to ..\..\ml64i4.dll and add
+         <Link>ml64i4.dll</Link> so it still lands flat in the output. -->
+    <None Include="ml64i4.dll" Condition="Exists('ml64i4.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
   <!--
     Alternative to the NuGet package: reference the Wolfram.NETLink.dll that
     ships INSIDE your Mathematica install (a matched managed/native pair — use
