@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- Wolfram.NETLink's EvaluateToImage returns System.Drawing.Image.
+         System.Drawing.Common is Windows-only on modern .NET; the local-kernel
+         path is a desktop scenario, so this is expected. Set to windows if you
+         hit the platform-analyzer warning:
+         <TargetFramework>net8.0-windows</TargetFramework> -->
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- System.Drawing.Common is needed by EvaluateToImage. -->
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Wolfram.NETLink is NOT on NuGet. It ships inside your Mathematica install.
+         Point HintPath at your version's DLL. Typical locations:
+           Windows: C:\Program Files\Wolfram Research\Mathematica\<ver>\SystemFiles\Links\NETLink\Wolfram.NETLink.dll
+           macOS:   /Applications/Mathematica.app/Contents/SystemFiles/Links/NETLink/Wolfram.NETLink.dll
+           Linux:   /usr/local/Wolfram/Mathematica/<ver>/SystemFiles/Links/NETLink/Wolfram.NETLink.dll
+         Uncomment and fix the path for your machine: -->
+    <!--
+    <Reference Include="Wolfram.NETLink">
+      <HintPath>C:\Program Files\Wolfram Research\Mathematica\14.0\SystemFiles\Links\NETLink\Wolfram.NETLink.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    -->
+  </ItemGroup>
+
+</Project>
